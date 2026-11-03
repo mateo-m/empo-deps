@@ -1,48 +1,66 @@
 # empo-deps
 
-Prebuilt binary dependencies for [empo-app](https://github.com/mateo-m/empo-app) that are too large to ship in the app repo's git history.
+Prebuilt binary dependencies for [empo-app](https://github.com/mateo-m/empo-app). The files are too large for the git history of empo-app, so this repo keeps them as release assets. The repo is public.
 
-This repo holds **release tags only**. There's no source here. Each tag has a `.tar.gz` attached that the empo-app build script fetches at first build.
-
-## Why not commit binaries to empo-app?
-
-ANGLE static libs alone are ~80 MB. Tracking them inflates every fresh clone of empo-app and balloons the git pack. They update once every several months, so version-pinning them via tagged releases here is cheaper than carrying them in history.
+The repo has no source code. It has the releases and the workflow that builds the ANGLE release.
 
 ## Releases
 
-| Tag | What | Notes |
+Run `gh release list -R mateo-m/empo-deps` to see all releases.
+
+### ANGLE
+
+Each `angle-*` release has a tarball of the ANGLE static libraries and headers. empo-app pins one release in `ios/Dependencies/ANGLE/.version`.
+
+| Tag | Asset | Contents |
 |---|---|---|
-| `angle-2026-05-04` | iOS ANGLE prebuilt | iphoneos arm64 + iphonesimulator arm64 static libs + headers |
+| `angle-2026-11-01` | `angle-apple-prebuilt.tar.gz` | iphoneos, iphonesimulator and macosx, arm64. This is the release that empo-app uses. |
+| `angle-2026-10-01` | `angle-ios-prebuilt.tar.gz` | iphoneos and iphonesimulator, arm64 |
+| `angle-2026-05-04` | `angle-ios-prebuilt.tar.gz` | iphoneos and iphonesimulator, arm64 |
 
-## Publishing a new ANGLE prebuilt
+The tarball has an `include/` and a `lib/` folder for each SDK. `lib/` has `libANGLE_static.a`, `libGLESv2_static.a` and `libEGL_static.a`. The release notes give the sha256 of the tarball and the ANGLE commit.
 
-From an empo-app checkout with current binaries in `ios/Dependencies/ANGLE/`:
+### Native deps
+
+The 38 `native-*` releases, from `native-2026-06-22` to `native-2026-09-27-r2`, have the asset `native-ios-prebuilt.tar.gz`. It holds the iOS build folders of OpenSSL, SDL2, Ruby and the mkxp core. The `deps-publish.yml` workflow of empo-app made these releases. empo-app stopped using them in [empo-app#164](https://github.com/mateo-m/empo-app/pull/164), and now gets the engine from the releases of [mkxp-z-apple-mobile](https://github.com/mateo-m/mkxp-z-apple-mobile). Older commits of empo-app still download them, so do not delete them.
+
+## Make an ANGLE release
+
+The "ANGLE prebuilt" workflow (`.github/workflows/angle.yml`) runs `tools/angle/build.sh` of empo-app on a GitHub Mac runner with Xcode 27.2.
+
+1. Open **Actions** > **ANGLE prebuilt** > **Run workflow**.
+2. Set **empo-app branch, tag, or commit** to the empo-app version to build from.
+3. Set **Tag suffix** to the part after `angle-`, for example `2026-12-01-r2`. Leave it empty to use the UTC date of today.
+4. To only test the build, leave **Create the release** off. The run keeps `angle-apple-prebuilt.tar.gz` as an artifact for 90 days. The run summary gives its sha256.
+5. To publish, turn on **Create the release**. The workflow creates the release with the tarball, writes the sha256 in the notes, and attests the build provenance. It stops before the build when the release exists.
+
+The build takes about 20 minutes.
+
+The artifact is the tarball itself, not a zip, so `gh run download` cannot get it. Use the API. Put the run ID in `RUN`:
 
 ```sh
-cd ios/Dependencies/ANGLE
-TAG=angle-$(date +%Y-%m-%d)
-tar -czf /tmp/angle-ios-prebuilt.tar.gz iphoneos/{include,lib} iphonesimulator/{include,lib}
-SHA=$(shasum -a 256 /tmp/angle-ios-prebuilt.tar.gz | awk '{print $1}')
-
-gh release create "$TAG" /tmp/angle-ios-prebuilt.tar.gz \
-  --repo mateo-m/empo-deps \
-  --title "ANGLE prebuilt $TAG" \
-  --notes "sha256: $SHA"
+ID=$(gh api repos/mateo-m/empo-deps/actions/runs/$RUN/artifacts --jq '.artifacts[0].id')
+gh api repos/mateo-m/empo-deps/actions/artifacts/$ID/zip >angle-apple-prebuilt.tar.gz
 ```
 
-Then bump `ios/Dependencies/ANGLE/.version` in empo-app:
+Then pin the new release in empo-app. Use the tag and the sha256 from the release notes:
 
 ```sh
 cat > ios/Dependencies/ANGLE/.version <<VERSION
-ANGLE_VERSION=$TAG
-ANGLE_SHA256=$SHA
+ANGLE_VERSION=angle-2026-12-01
+ANGLE_SHA256=<sha256 from the release notes>
+ANGLE_ASSET=angle-apple-prebuilt.tar.gz
 VERSION
 ```
 
-Commit + push. Next build hydrates from the new release.
+To check that the workflow of this repo built a tarball:
 
-## How empo-app fetches
+```sh
+gh attestation verify angle-apple-prebuilt.tar.gz -R mateo-m/empo-deps
+```
 
-`tools/fetch-angle.sh` in empo-app reads `ios/Dependencies/ANGLE/.version`, calls `gh release download` against this repo, verifies sha256, extracts. Skips if a stamp file matches the requested version.
+Releases before the workflow, up to `angle-2026-11-01`, were built by hand. They have no attestation.
 
-The repo is currently private; access requires `gh auth login`. When empo-app goes public this repo will go public too and the fetch script can switch to plain curl.
+## How empo-app downloads ANGLE
+
+`tools/fetch-angle.sh` in empo-app reads `ios/Dependencies/ANGLE/.version`. It downloads the asset with `gh release download`, checks the sha256, and extracts the tarball into `ios/Dependencies/ANGLE/`. It does nothing when a stamp file has the same version and the libraries are on disk.
