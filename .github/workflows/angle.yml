@@ -1,0 +1,119 @@
+name: ANGLE prebuilt
+
+on:
+  workflow_dispatch:
+    inputs:
+      empo_app_ref:
+        description: empo-app branch, tag, or commit to build from
+        default: main
+      version:
+        description: Tag suffix after "angle-". Empty uses today's UTC date (YYYY-MM-DD).
+        default: ""
+      publish:
+        description: Create the release
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/angle.yml
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ASSET: angle-apple-prebuilt.tar.gz
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 340
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      angle_commit: ${{ steps.build.outputs.angle_commit }}
+      app_commit: ${{ steps.app.outputs.commit }}
+    steps:
+      - id: app
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mateo-m/empo-app
+          ref: ${{ inputs.empo_app_ref }}
+          path: empo-app
+          persist-credentials: false
+
+      - name: Show Xcode and disk
+        run: |
+          xcodebuild -version
+          df -h "$RUNNER_TEMP"
+
+      - id: build
+        name: Build ANGLE
+        run: |
+          empo-app/tools/angle/build.sh "$RUNNER_TEMP/work" "$RUNNER_TEMP/out"
+          echo "angle_commit=$(git -C "$RUNNER_TEMP/work/angle" rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          df -h "$RUNNER_TEMP"
+          du -sh "$RUNNER_TEMP/work"/*
+
+      - id: pack
+        name: Pack the tarball
+        run: |
+          tar --no-mac-metadata -czf "$RUNNER_TEMP/$ASSET" -C "$RUNNER_TEMP/out" iphoneos iphonesimulator macosx
+          sha256="$(shasum -a 256 "$RUNNER_TEMP/$ASSET" | cut -d' ' -f1)"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+          echo "$ASSET sha256: \`$sha256\`" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/${{ env.ASSET }}
+          archive: false
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.ASSET }}
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.ASSET }}
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+          ANGLE_COMMIT: ${{ needs.build.outputs.angle_commit }}
+          APP_COMMIT: ${{ needs.build.outputs.app_commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          tag="angle-${VERSION:-$(date -u +%Y-%m-%d)}"
+          cat >notes.md <<NOTES
+          Prebuilt ANGLE static libraries + headers for iOS and macOS.
+
+          Contents: iphoneos arm64, iphonesimulator arm64 and macosx arm64.
+
+          sha256: $SHA256
+
+          Built from ANGLE $ANGLE_COMMIT with empo-app's \`tools/angle/build.sh\` and the patches next to it, at mateo-m/empo-app@$APP_COMMIT, in $RUN_URL.
+
+          Pinned by empo-app at \`ios/Dependencies/ANGLE/.version\`. Hydrated at build time via \`tools/fetch-angle.sh\`.
+          NOTES
+          gh release create "$tag" "$ASSET" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ANGLE iOS and macOS prebuilt $tag" \
+            --notes-file notes.md
