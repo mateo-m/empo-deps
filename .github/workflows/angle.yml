@@ -30,14 +30,30 @@ env:
 jobs:
   build:
     runs-on: xcode-27
-    timeout-minutes: 340
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     outputs:
+      tag: ${{ steps.tag.outputs.tag }}
       sha256: ${{ steps.pack.outputs.sha256 }}
       angle_commit: ${{ steps.build.outputs.angle_commit }}
       app_commit: ${{ steps.app.outputs.commit }}
     steps:
+      - id: tag
+        name: Pick the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          tag="angle-${VERSION:-$(date -u +%Y-%m-%d)}"
+          git check-ref-format "tags/$tag" || { echo "::error::$tag is not a valid tag name"; exit 1; }
+          if [ "$PUBLISH" = true ] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::The release $tag exists. Set another tag suffix."
+            exit 1
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
       - id: app
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,18 +62,14 @@ jobs:
           path: empo-app
           persist-credentials: false
 
-      - name: Show Xcode and disk
-        run: |
-          xcodebuild -version
-          df -h "$RUNNER_TEMP"
+      - name: Show the Xcode version
+        run: xcodebuild -version
 
       - id: build
         name: Build ANGLE
         run: |
           empo-app/tools/angle/build.sh "$RUNNER_TEMP/work" "$RUNNER_TEMP/out"
           echo "angle_commit=$(git -C "$RUNNER_TEMP/work/angle" rev-parse HEAD)" >>"$GITHUB_OUTPUT"
-          df -h "$RUNNER_TEMP"
-          du -sh "$RUNNER_TEMP/work"/*
 
       - id: pack
         name: Pack the tarball
@@ -94,13 +106,12 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
           SHA256: ${{ needs.build.outputs.sha256 }}
           ANGLE_COMMIT: ${{ needs.build.outputs.angle_commit }}
           APP_COMMIT: ${{ needs.build.outputs.app_commit }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          tag="angle-${VERSION:-$(date -u +%Y-%m-%d)}"
           cat >notes.md <<NOTES
           Prebuilt ANGLE static libraries + headers for iOS and macOS.
 
@@ -112,8 +123,8 @@ jobs:
 
           Pinned by empo-app at \`ios/Dependencies/ANGLE/.version\`. Hydrated at build time via \`tools/fetch-angle.sh\`.
           NOTES
-          gh release create "$tag" "$ASSET" \
+          gh release create "$TAG" "$ASSET" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "ANGLE iOS and macOS prebuilt $tag" \
+            --title "ANGLE iOS and macOS prebuilt $TAG" \
             --notes-file notes.md
