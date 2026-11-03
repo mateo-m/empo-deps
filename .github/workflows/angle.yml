@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       empo_app_ref:
-        description: empo-app branch, tag, or commit to build from
+        description: empo-app branch, tag, or full commit SHA to build from
         default: main
       version:
         description: Tag suffix after "angle-". Empty uses today's UTC date (YYYY-MM-DD).
@@ -16,6 +16,11 @@ on:
 
 permissions:
   contents: read
+
+# Two runs for one tag would both build, and only the first can publish.
+concurrency:
+  group: angle
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -35,6 +40,7 @@ jobs:
       sha256: ${{ steps.pack.outputs.sha256 }}
       angle_commit: ${{ steps.build.outputs.angle_commit }}
       app_commit: ${{ steps.app.outputs.commit }}
+      xcode: ${{ steps.xcode.outputs.version }}
     steps:
       - id: tag
         name: Pick the tag
@@ -43,11 +49,27 @@ jobs:
           VERSION: ${{ inputs.version }}
           PUBLISH: ${{ inputs.publish }}
         run: |
-          tag="angle-${VERSION:-$(date -u +%Y-%m-%d)}"
-          git check-ref-format "tags/$tag" || { echo "::error::$tag is not a valid tag name"; exit 1; }
-          if [ "$PUBLISH" = true ] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::The release $tag exists. Set another tag suffix."
+          # A slash in the tag makes the download URL of the asset ambiguous.
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9._-]*$ ]]; then
+            echo "::error::The tag suffix can have only letters, digits, '.', '_' and '-'."
             exit 1
+          fi
+          tag="angle-${VERSION:-$(date -u +%Y-%m-%d)}"
+          if [ "$PUBLISH" = true ]; then
+            # Only a 404 means that the release is free. Any other error
+            # stops the run before the build.
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >/dev/null 2>"$RUNNER_TEMP/release.err"; then
+              echo "::error::The release $tag exists. Set another tag suffix."
+              exit 1
+            elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/release.err"; then
+              cat "$RUNNER_TEMP/release.err" >&2
+              exit 1
+            fi
+            # gh release create uses a tag that exists and ignores --target.
+            if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$tag" >/dev/null; then
+              echo "::error::The tag $tag exists without a release. Set another tag suffix."
+              exit 1
+            fi
           fi
           echo "tag=$tag" >>"$GITHUB_OUTPUT"
 
@@ -59,8 +81,11 @@ jobs:
           path: empo-app
           persist-credentials: false
 
-      - name: Show the Xcode version
-        run: xcodebuild -version
+      - id: xcode
+        name: Show the Xcode version
+        run: |
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | paste -sd ' ' -)" >>"$GITHUB_OUTPUT"
 
       - id: build
         name: Build ANGLE
@@ -107,6 +132,7 @@ jobs:
           SHA256: ${{ needs.build.outputs.sha256 }}
           ANGLE_COMMIT: ${{ needs.build.outputs.angle_commit }}
           APP_COMMIT: ${{ needs.build.outputs.app_commit }}
+          XCODE: ${{ needs.build.outputs.xcode }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           cat >notes.md <<NOTES
@@ -116,7 +142,7 @@ jobs:
 
           sha256: $SHA256
 
-          Built from ANGLE $ANGLE_COMMIT with empo-app's \`tools/angle/build.sh\` and the patches next to it, at mateo-m/empo-app@$APP_COMMIT, in $RUN_URL.
+          Built from ANGLE $ANGLE_COMMIT with empo-app's \`tools/angle/build.sh\` and the patches next to it, at mateo-m/empo-app@$APP_COMMIT, with $XCODE, in $RUN_URL.
 
           Pinned by empo-app at \`ios/Dependencies/ANGLE/.version\`. Hydrated at build time via \`tools/fetch-angle.sh\`.
           NOTES
